@@ -209,8 +209,8 @@ SQL query:"""
             'response_tokens_estimated': len(sql) // 4,
             'total_tokens_estimated': prompt_tokens + len(sql) // 4,
             'context_window': model_config['context_window'],
-            'truncated': (prompt_tokens + len(sql) // 4) > model_config['context_window'] * 0.9,
-            **config_info
+            'truncated': (prompt_tokens + len(sql) // 4) > model_config['context_window'] * 0.9, # REVISE: WHERE IS THIS USED
+            **config_info # REVISE: WHAT DOES THIS DO
         }
         
         return sql, generation_info
@@ -316,13 +316,15 @@ SQL query:"""
         }
     }
 
-    gen_info = {
+   gen_info = {
             "query": query,
-            "generation_info": [] # WHAT DID GEN_INFO HAVE
+            "generation_info": {
+                    'prompt_tokens_estimated': len(batch_request["body"]) // 4,
+                    'context_window': model_config['context_window']
+                }
     }
 
-    # need also to process & return query, generation info
-    return batch_request, query
+    return batch_request, gen_info 
     
 
 def evaluate_single_query(
@@ -489,14 +491,15 @@ def evaluate_database(
     pending = []
 
     for nl_file_path, nl_file, ground_truth_sql, ground_truth_results in tasks:
-        single, query = generate_batch_req(nl_file_path, db_path, schema_file, model_name, ground_truth_sql, ground_truth_results, max_tables,max_columns_per_table)
+        single, gen_info = generate_batch_req(nl_file_path, db_path, schema_file, model_name, ground_truth_sql, ground_truth_results, max_tables,max_columns_per_table)
         if single:
             batch_requests.append(single)
             pend_item = {
                     'custom_id': single["custom_id"],
                     'file': nl_file,
-                    'query': query,
-                    'ground_truth_sql': ground_truth_sql
+                    'query': gen_info["query"],
+                    'ground_truth_sql': ground_truth_sql,
+                    'generation_info': gen_info["generation_info"]
 
             }
             pending.append(single)
@@ -541,6 +544,8 @@ def evaluate_database(
             print("Batch error details:")
             print(b.errors)
         time.sleep(30)
+
+    # REVISE: WHEN COMPLETED, CAN PUT THE EXACT TOKENS USED IN GENERATION_INFO
 
     print(b.model_dump_json(indent=2))
 
@@ -588,6 +593,9 @@ def evaluate_database(
             result['sql_exact_match'] = True
 
         # result match
+        # REVISE: 
+        #   THIS SEEMS TO CHECK ONLY IF THE LENGTH OF THE OUTPUT SUCCEEDS,
+        #   NOT IF THE SQL GOT THE SAME RESULTS.
         if exec_success and gt_exec_success:
             if len(exec_results) == 0 and len(gt_results) == 0:
                 result['results_match'] = True
