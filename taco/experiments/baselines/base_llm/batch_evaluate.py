@@ -209,8 +209,8 @@ SQL query:"""
             'response_tokens_estimated': len(sql) // 4,
             'total_tokens_estimated': prompt_tokens + len(sql) // 4,
             'context_window': model_config['context_window'],
-            'truncated': (prompt_tokens + len(sql) // 4) > model_config['context_window'] * 0.9, # REVISE: WHERE IS THIS USED
-            **config_info # REVISE: WHAT DOES THIS DO
+            'truncated': (prompt_tokens + len(sql) // 4) > model_config['context_window'] * 0.9,
+            **config_info
         }
         
         return sql, generation_info
@@ -255,7 +255,6 @@ def compare_results(result1: List, result2: List) -> bool:
     
     return set1 == set2
 
-# ADDED BY ME - MODIFY FOR BATCH API
 def generate_batch_req(
     nl_query_file: str,
     db_path: str,
@@ -266,6 +265,8 @@ def generate_batch_req(
     max_tables: int = 100,
     max_columns_per_table: int = 30
 ) -> Dict:
+    """Generates a batch request object based on an NL query"""
+
     # Load NL query
     with open(nl_query_file, 'r', encoding='utf-8') as f:
         nl_data = json.load(f)
@@ -319,95 +320,14 @@ SQL query:"""
    gen_info = {
             "query": query,
             "generation_info": {
-                    'prompt_tokens_estimated': len(batch_request["body"]) // 4,
-                    'context_window': model_config['context_window']
+                    'context_window': MODEL_CONFIGS[model_name]['context_window'],
+                    **config_info
                 }
     }
 
+
     return batch_request, gen_info 
     
-
-def evaluate_single_query(
-    nl_query_file: str,
-    db_path: str,
-    schema_file: str,
-    model_name: str,
-    ground_truth_sql: str,
-    ground_truth_results: List,
-    max_tables: int = 100,
-    max_columns_per_table: int = 30
-) -> Dict:
-    """Evaluate a single query"""
-    # Load NL query
-    with open(nl_query_file, 'r', encoding='utf-8') as f:
-        nl_data = json.load(f)
-    
-    query = nl_data.get('natural_language_query', '')
-    database = nl_data.get('database', '')
-    
-    if not query:
-        return {
-            'success': False,
-            'error': 'Missing natural_language_query'
-        }
-    
-    # Load schema
-    schema = load_schema(schema_file)
-    
-    # Format schema (simple and direct, include as many tables as possible)
-    schema_text, config_info = format_schema_simple(schema, max_tables, max_columns_per_table)
-    
-    # Generate SQL
-    client = get_client(model_name)
-    generated_sql, generation_info = generate_sql_baseline(
-        client, model_name, query, schema_text, database, config_info
-    )
-    
-    if not generated_sql:
-        return {
-            'success': False,
-            'error': 'Failed to generate SQL',
-            'generation_info': generation_info
-        }
-    
-    # Execute generated SQL
-    exec_success, exec_results, exec_error = execute_sql(db_path, generated_sql)
-    
-    # Execute ground truth SQL
-    gt_exec_success, gt_results, gt_error = execute_sql(db_path, ground_truth_sql)
-    
-    # Evaluate
-    result = {
-        'query': query,
-        'ground_truth_sql': ground_truth_sql,
-        'generated_sql': generated_sql,
-        'exec_success': exec_success,
-        'exec_error': exec_error,
-        'exec_results': exec_results if exec_success else None,
-        'gt_exec_success': gt_exec_success,
-        'gt_results': gt_results if gt_exec_success else None,
-        'results_match': False,
-        'sql_exact_match': False,
-        'generation_info': generation_info
-    }
-    
-    # Exact SQL match
-    if normalize_sql(generated_sql) == normalize_sql(ground_truth_sql):
-        result['sql_exact_match'] = True
-    
-    # Result match
-    if exec_success and gt_exec_success:
-        if len(exec_results) == 0 and len(gt_results) == 0:
-            result['results_match'] = True
-        elif len(exec_results) > 0 and len(gt_results) > 0:
-            if compare_results(exec_results, gt_results):
-                result['results_match'] = True
-        else:
-            result['results_match'] = False
-    
-    result['success'] = exec_success
-    
-    return result
 
 def evaluate_database(
     nl_query_dir: str,
@@ -433,7 +353,6 @@ def evaluate_database(
     # Get SQL file list and index mapping
     sql_file_list = sorted([f for f in os.listdir(sql_dir) if f.startswith('generated_sql_') and f.endswith('.json') and '_error' not in f],
                           key=lambda x: int(x.split('_')[-1].split('.')[0]) if x.split('_')[-1].split('.')[0].isdigit() else 0)
-    
     # Create mapping from SQL index to filename
     sql_index_map = {}
     for sql_file in sql_file_list:
@@ -485,24 +404,29 @@ def evaluate_database(
         
         tasks.append((nl_file_path, nl_file, ground_truth_sql, ground_truth_results))
     
-    # ADDED BY COPILOT
     # Batch API accumulation
     batch_requests = []
-    pending = []
+    pending = {}
 
     for nl_file_path, nl_file, ground_truth_sql, ground_truth_results in tasks:
         single, gen_info = generate_batch_req(nl_file_path, db_path, schema_file, model_name, ground_truth_sql, ground_truth_results, max_tables,max_columns_per_table)
         if single:
             batch_requests.append(single)
-            pend_item = {
-                    'custom_id': single["custom_id"],
-                    'file': nl_file,
-                    'query': gen_info["query"],
-                    'ground_truth_sql': ground_truth_sql,
-                    'generation_info': gen_info["generation_info"]
+            #pend_item = {
+             #       single["custom_id"]: {
+              #          'file': nl_file,
+               #         'query': gen_info["query"],
+                #        'ground_truth_sql': ground_truth_sql,
+                 #       'generation_info': gen_info["generation_info"]
+            #        }
 
-            }
-            pending.append(single)
+            #}
+            pending[single["custom_id"]] = {
+                        'file': nl_file,
+                        'query': gen_info["query"],
+                        'ground_truth_sql': ground_truth_sql,
+                        'generation_info': gen_info["generation_info"]
+                    }
         else:
             print("generate_batch_req() failed, null")
     
@@ -545,7 +469,6 @@ def evaluate_database(
             print(b.errors)
         time.sleep(30)
 
-    # REVISE: WHEN COMPLETED, CAN PUT THE EXACT TOKENS USED IN GENERATION_INFO
 
     print(b.model_dump_json(indent=2))
 
@@ -561,13 +484,18 @@ def evaluate_database(
             obj = json.loads(line)
             cid = obj["custom_id"]
             sql = obj["response"]["choices"][0]["message"]["content"]
+            # Modify generation_info in pending based on batch results
+            pending[cid]["generation_info"]["prompt_tokens"] = obj["response"]["body"]["usage"]["prompt_tokens"]
+            pending[cid]["generation_info"]["response_tokens"] = obj["response"]["body"]["usage"]["completion_tokens"]
+            pending[cid]["generation_info"]["total_tokens"] = obj["response"]["body"]["usage"]["total_tokens"]
+            pending[cid]["generation_info"]["truncated"] = ((pending[cid]["generation_info"]["prompt_tokens"] 
+                                                                + len(sql) // 4) > model_config['context_window'] * 0.9)
             batch_results[cid] = sql
 
     results = []
 
-    for item in pending:
-        cid = item["custom_id"]
-        generated_sql = batch_results[cid].strip().rstrip(";") + ";"
+    for item_id, item in pending.items():
+        generated_sql = batch_results[item_id].strip().rstrip(";") + ";"
 
         exec_success, exec_results, exec_error = execute_sql(db_path, generated_sql)
         gt_exec_success, gt_results, gt_error = execute_sql(db_path, item["ground_truth_sql"])
@@ -604,7 +532,6 @@ def evaluate_database(
                     result['results_match'] = True
 
         results.append(result)
-    # END OF ADDED BY COPILOT
 
     # Statistics
     total = len(results)
